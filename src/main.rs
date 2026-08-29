@@ -99,13 +99,11 @@ impl EventHandler for Bot {
         };
 
         let result = match cmd.data.name.as_str() {
-            "upload" => self.upload(&ctx, &cmd).await,
-            "capacitorfile" => self.capacitorfile_upload(&ctx, &cmd).await,
+            "dataset" => self.dataset(&ctx, &cmd).await,
+            "capacitorfile" => self.capacitorfile(&ctx, &cmd).await,
             "train" => self.train(&ctx, &cmd).await,
             "query" => self.query(&ctx, &cmd).await,
             "list" => self.list(&ctx, &cmd).await,
-            "datasets" => self.datasets(&ctx, &cmd).await,
-            "capacitorfiles" => self.capacitorfiles(&ctx, &cmd).await,
             "show" => self.show(&ctx, &cmd).await,
             "delete" => self.delete(&ctx, &cmd).await,
             "about" => self.about(&ctx, &cmd).await,
@@ -129,7 +127,34 @@ impl EventHandler for Bot {
 }
 
 impl Bot {
-    async fn upload(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
+    async fn dataset(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
+        // `/dataset` is a command group; dispatch on its subcommand.
+        let Some(sub) = cmd.data.options.first() else {
+            reply(ctx, cmd, "Usage: `/dataset upload|list`.").await?;
+            return Ok(());
+        };
+
+        let CommandDataOptionValue::SubCommand(opts) = &sub.value else {
+            reply(ctx, cmd, "Usage: `/dataset upload|list`.").await?;
+            return Ok(());
+        };
+
+        match sub.name.as_str() {
+            "upload" => self.dataset_upload(ctx, cmd, opts).await,
+            "list" => self.dataset_list(ctx, cmd).await,
+            other => {
+                reply(ctx, cmd, format!("Unknown dataset subcommand `{other}`.")).await?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn dataset_upload(
+        &self,
+        ctx: &Context,
+        cmd: &CommandInteraction,
+        options: &[CommandDataOption],
+    ) -> anyhow::Result<()> {
         let namespace = namespace(cmd);
 
         let Some(dataset) = cmd.data.resolved.attachments.values().next() else {
@@ -141,7 +166,7 @@ impl Bot {
 
         // An explicit `name` overrides the attachment filename, letting users
         // pick a stable identifier and avoid `unique_path` suffixes.
-        let name = option_str(&cmd.data.options, "name")
+        let name = option_str(options, "name")
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| dataset.filename.clone());
 
@@ -162,7 +187,8 @@ impl Bot {
             ctx,
             cmd,
             format!(
-                "Uploaded dataset as `{file_name}` ({} bytes). Use it with `/train`.",
+                "Uploaded dataset as `{file_name}` ({} bytes). Use it with \
+                 `/train dataset:{file_name}`.",
                 bytes.len()
             ),
         )
@@ -171,10 +197,70 @@ impl Bot {
         Ok(())
     }
 
+    async fn dataset_list(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
+        let namespace = namespace(cmd);
+        let datasets = self.data.store.lock().unwrap().list_datasets(namespace);
+
+        if datasets.is_empty() {
+            reply(
+                ctx,
+                cmd,
+                "No datasets uploaded in this server yet. Use `/dataset upload`.",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let lines = datasets
+            .iter()
+            .map(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("dataset");
+                format!(
+                    "- `{name}` ({} bytes)",
+                    p.metadata().map(|m| m.len()).unwrap_or(0)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        reply(ctx, cmd, format!("Datasets in this server:\n{lines}")).await?;
+
+        Ok(())
+    }
+
+    async fn capacitorfile(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
+        // `/capacitorfile` is a command group; dispatch on its subcommand.
+        let Some(sub) = cmd.data.options.first() else {
+            reply(ctx, cmd, "Usage: `/capacitorfile upload|list|info`.").await?;
+            return Ok(());
+        };
+
+        let CommandDataOptionValue::SubCommand(opts) = &sub.value else {
+            reply(ctx, cmd, "Usage: `/capacitorfile upload|list|info`.").await?;
+            return Ok(());
+        };
+
+        match sub.name.as_str() {
+            "upload" => self.capacitorfile_upload(ctx, cmd, opts).await,
+            "list" => self.capacitorfile_list(ctx, cmd).await,
+            "info" => self.capacitorfile_info(ctx, cmd, opts).await,
+            other => {
+                reply(
+                    ctx,
+                    cmd,
+                    format!("Unknown capacitorfile subcommand `{other}`."),
+                )
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
     async fn capacitorfile_upload(
         &self,
         ctx: &Context,
         cmd: &CommandInteraction,
+        options: &[CommandDataOption],
     ) -> anyhow::Result<()> {
         let namespace = namespace(cmd);
 
@@ -187,7 +273,7 @@ impl Bot {
 
         // An explicit `name` overrides the attachment filename, letting users
         // pick a stable identifier and avoid `unique_path` suffixes.
-        let name = option_str(&cmd.data.options, "name")
+        let name = option_str(options, "name")
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| attachment.filename.clone());
 
@@ -215,6 +301,114 @@ impl Bot {
         )
         .await?;
 
+        Ok(())
+    }
+
+    async fn capacitorfile_list(
+        &self,
+        ctx: &Context,
+        cmd: &CommandInteraction,
+    ) -> anyhow::Result<()> {
+        let namespace = namespace(cmd);
+        let files = self
+            .data
+            .store
+            .lock()
+            .unwrap()
+            .list_capacitorfiles(namespace);
+
+        if files.is_empty() {
+            reply(
+                ctx,
+                cmd,
+                "No capacitorfiles uploaded in this server yet. Use `/capacitorfile upload`.",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let lines = files
+            .iter()
+            .map(|p| {
+                let name = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("capacitorfile");
+                format!(
+                    "- `{name}` ({} bytes)",
+                    p.metadata().map(|m| m.len()).unwrap_or(0)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        reply(ctx, cmd, format!("Capacitorfiles in this server:\n{lines}")).await?;
+
+        Ok(())
+    }
+
+    async fn capacitorfile_info(
+        &self,
+        ctx: &Context,
+        cmd: &CommandInteraction,
+        options: &[CommandDataOption],
+    ) -> anyhow::Result<()> {
+        let namespace = namespace(cmd);
+
+        let Some(name) = option_str(options, "name") else {
+            reply(ctx, cmd, "Missing required `name` option.").await?;
+            return Ok(());
+        };
+
+        let path = {
+            let store = self.data.store.lock().unwrap();
+            store.find_capacitorfile(namespace, &name)
+        };
+
+        let Some(path) = path else {
+            reply(
+                ctx,
+                cmd,
+                format!("No capacitorfile named `{name}` in this server."),
+            )
+            .await?;
+            return Ok(());
+        };
+
+        let content = std::fs::read_to_string(&path)?;
+
+        let size = std::fs::metadata(&path)
+            .map(|m| m.len())
+            .unwrap_or_else(|_| content.len() as u64);
+
+        // If it parses as a recipe, show which datasets it references and
+        // whether each is uploaded; otherwise note it isn't a valid recipe.
+        let references = match Recipe::from_str(&content) {
+            Ok(recipe) => {
+                let store = self.data.store.lock().unwrap();
+                recipe
+                    .files
+                    .iter()
+                    .filter_map(|f| f.path.file_name().and_then(|n| n.to_str()))
+                    .map(|f| {
+                        if store.find_dataset(namespace, f).is_some() {
+                            format!("- `{f}` (uploaded)")
+                        } else {
+                            format!("- `{f}` (missing — `/dataset upload` it first)")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            Err(_) => String::from("- *(not a valid recipe; saved as-is)*"),
+        };
+
+        let body = format!(
+            "**{name}** ({size} bytes)\n\n**References**\n{references}\n\n```\n{content}\n```",
+            content = clip(&content, 1900),
+        );
+
+        reply(ctx, cmd, clip(&body, 2000)).await?;
         Ok(())
     }
 
@@ -428,7 +622,7 @@ impl Bot {
             reply(
                 ctx,
                 cmd,
-                "No models in this server yet. Upload a dataset and `/train` one.",
+                "No models in this server yet. Use `/dataset upload` and `/train` one.",
             )
             .await?;
             return Ok(());
@@ -452,102 +646,26 @@ impl Bot {
         Ok(())
     }
 
-    async fn datasets(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
-        let namespace = namespace(cmd);
-        let datasets = self.data.store.lock().unwrap().list_datasets(namespace);
-
-        if datasets.is_empty() {
-            reply(
-                ctx,
-                cmd,
-                "No datasets uploaded in this server yet. Use `/upload`.",
-            )
-            .await?;
-            return Ok(());
-        }
-
-        let lines = datasets
-            .iter()
-            .map(|p| {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("dataset");
-                format!(
-                    "- `{name}` ({} bytes)",
-                    p.metadata().map(|m| m.len()).unwrap_or(0)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        reply(ctx, cmd, format!("Datasets in this server:\n{lines}")).await?;
-
-        Ok(())
-    }
-
-    async fn capacitorfiles(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
-        let namespace = namespace(cmd);
-        let files = self
-            .data
-            .store
-            .lock()
-            .unwrap()
-            .list_capacitorfiles(namespace);
-
-        if files.is_empty() {
-            reply(
-                ctx,
-                cmd,
-                "No capacitorfiles uploaded in this server yet. Use `/capacitorfile`.",
-            )
-            .await?;
-            return Ok(());
-        }
-
-        let lines = files
-            .iter()
-            .map(|p| {
-                let name = p
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("capacitorfile");
-                format!(
-                    "- `{name}` ({} bytes)",
-                    p.metadata().map(|m| m.len()).unwrap_or(0)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        reply(ctx, cmd, format!("Capacitorfiles in this server:\n{lines}")).await?;
-
-        Ok(())
-    }
-
     async fn autocomplete(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
         let namespace = namespace(cmd);
 
-        // Find the option currently being autocompleted, noting *which* option
-        // it is so we can offer the right set of names: a dataset selector must
-        // never mix raw datasets with capacitorfile recipes, and a model
-        // selector must never show either.
-        let Some((option_name, partial)) = cmd.data.options.iter().find_map(|option| match &option
-            .value
-        {
-            CommandDataOptionValue::Autocomplete { value, .. } => {
-                Some((option.name.clone(), value.clone()))
-            }
-            _ => None,
-        }) else {
+        // `autocomplete()` recurses through subcommands and returns the leaf
+        // option that is currently focused, so we know exactly which selector
+        // to populate. A dataset selector never mixes capacitorfile recipes,
+        // and a model selector never shows either.
+        let Some(auto) = cmd.data.autocomplete() else {
             return Ok(());
         };
 
-        let query = partial.to_lowercase();
+        let option_name = auto.name;
+        let query = auto.value.to_lowercase();
 
         let names: Vec<String> = {
             let store = self.data.store.lock().unwrap();
 
-            match (cmd.data.name.as_str(), option_name.as_str()) {
-                ("train", "dataset") => store
-                    .list_datasets(namespace)
+            match (cmd.data.name.as_str(), option_name) {
+                ("train", "dataset") | ("capacitorfile", "name") => store
+                    .list_capacitorfiles(namespace)
                     .into_iter()
                     .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned))
                     .collect(),
@@ -656,8 +774,8 @@ impl Bot {
             ctx,
             cmd,
             "**Capacitor bot**\n\
-             Commands: `/upload`, `/capacitorfile`, `/train`, `/query`, `/list`, \
-             `/datasets`, `/capacitorfiles`, `/show`, `/delete`.",
+             Commands: `/dataset` (`upload`/`list`), `/capacitorfile` (`upload`/`list`/`info`), \
+             `/train`, `/query`, `/list`, `/show`, `/delete`.",
         )
         .await?;
 
@@ -795,7 +913,7 @@ fn resolve_recipe(
             match store.find_dataset(namespace, file_name) {
                 Some(path) => path,
                 None => anyhow::bail!(
-                    "recipe references `{file_name}`, but no dataset with that name is uploaded in this server. `/upload` it first."
+                    "recipe references `{file_name}`, but no dataset with that name is uploaded in this server. `/dataset upload` it first."
                 ),
             }
         };
@@ -989,41 +1107,81 @@ fn progress_phase(event: &BuildProgress) -> String {
 
 fn commands() -> Vec<CreateCommand> {
     vec![
-        CreateCommand::new("upload")
-            .description("Upload a text dataset for this server")
+        CreateCommand::new("dataset")
+            .description("Manage text datasets for this server")
             .add_option(
                 CreateCommandOption::new(
-                    CommandOptionType::Attachment,
-                    "dataset",
-                    "The text file to use as training data",
+                    CommandOptionType::SubCommand,
+                    "upload",
+                    "Upload a text dataset (raw corpus) for training",
                 )
-                .required(true),
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::Attachment,
+                        "file",
+                        "The text file to use as training data",
+                    )
+                    .required(true),
+                )
+                .add_sub_option(CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "split",
+                    "Optional delimiter to split documents on",
+                ))
+                .add_sub_option(CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "name",
+                    "Custom name for the dataset (avoids collisions)",
+                )),
             )
             .add_option(CreateCommandOption::new(
-                CommandOptionType::String,
-                "split",
-                "Optional delimiter to split documents on",
-            ))
-            .add_option(CreateCommandOption::new(
-                CommandOptionType::String,
-                "name",
-                "Custom name for the dataset (avoids collisions with existing ones)",
+                CommandOptionType::SubCommand,
+                "list",
+                "List datasets in this server",
             )),
         CreateCommand::new("capacitorfile")
-            .description("Upload a capacitorfile recipe referencing uploaded datasets")
+            .description("Manage capacitorfile recipes for this server")
             .add_option(
                 CreateCommandOption::new(
-                    CommandOptionType::Attachment,
-                    "file",
-                    "The capacitorfile recipe to upload",
+                    CommandOptionType::SubCommand,
+                    "upload",
+                    "Upload a capacitorfile recipe",
                 )
-                .required(true),
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::Attachment,
+                        "file",
+                        "The capacitorfile recipe to upload",
+                    )
+                    .required(true),
+                )
+                .add_sub_option(CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "name",
+                    "Custom name for the capacitorfile (avoids collisions)",
+                )),
             )
             .add_option(CreateCommandOption::new(
-                CommandOptionType::String,
-                "name",
-                "Custom name for the capacitorfile (avoids collisions with existing ones)",
-            )),
+                CommandOptionType::SubCommand,
+                "list",
+                "List capacitorfile recipes in this server",
+            ))
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::SubCommand,
+                    "info",
+                    "Show details of a capacitorfile recipe",
+                )
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "name",
+                        "Name of the capacitorfile",
+                    )
+                    .required(true)
+                    .set_autocomplete(true),
+                ),
+            ),
         CreateCommand::new("train")
             .description("Train a model from a corpus or a capacitorfile recipe")
             .add_option(
@@ -1104,9 +1262,6 @@ fn commands() -> Vec<CreateCommand> {
                 "Optional fixed random seed for reproducibility",
             )),
         CreateCommand::new("list").description("List models available in this server"),
-        CreateCommand::new("datasets").description("List datasets uploaded in this server"),
-        CreateCommand::new("capacitorfiles")
-            .description("List capacitorfile recipes uploaded in this server"),
         CreateCommand::new("show")
             .description("Show details of a model")
             .add_option(
