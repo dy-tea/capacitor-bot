@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use serenity::all::*;
 
+use capacitor::model::BuildProgress;
 use capacitor::recipe::{Experts, File, Recipe, Tokenizer};
 
 use crate::jobs::Trainer;
@@ -303,11 +304,11 @@ impl Bot {
             .await?;
 
         loop {
-            if let Ok((curr, total)) = job.progress.try_recv() {
-                let pct = curr as f64 / total as f64 * 100.0;
+            if let Ok(event) = job.progress.try_recv() {
                 message = format!(
-                    "Training `{model_name}` (job `#{}`): expert {curr}/{total} ({pct:.0} %).",
-                    job.id
+                    "Training `{model_name}` (job `#{}`): {}",
+                    job.id,
+                    progress_phase(&event),
                 );
                 cmd.edit_response(ctx, EditInteractionResponse::new().content(&message))
                     .await?;
@@ -941,6 +942,49 @@ fn count_documents(path: &std::path::Path, delimiter: &str) -> anyhow::Result<us
             .filter(|d| !d.is_empty())
             .count()
     })
+}
+
+/// Render a capacitor build progress event as a human-readable phase, e.g.
+/// `"experts 3/4 (75%)"` or `"building tokens map"`.
+fn progress_phase(event: &BuildProgress) -> String {
+    let pct = |current: u64, total: u64| -> String {
+        if total == 0 {
+            String::new()
+        } else {
+            format!(" ({:.0}%)", current as f64 / total as f64 * 100.0)
+        }
+    };
+
+    match event {
+        BuildProgress::ReadFiles { current, total } => {
+            format!(
+                "reading files: {current}/{total}{}",
+                pct(*current as u64, *total as u64)
+            )
+        }
+        BuildProgress::PreTokenize { current, total } => {
+            format!(
+                "pre-tokenizing: {current}/{total} bytes{}",
+                pct(*current, *total)
+            )
+        }
+        BuildProgress::FitTokenizer { current, total } => {
+            format!(
+                "fitting tokenizer: {current}/{total} tokens{}",
+                pct(*current as u64, *total as u64)
+            )
+        }
+        BuildProgress::BuildTokensMap => "building tokens map".to_string(),
+        BuildProgress::BuildSharedTransitions => "building shared transitions".to_string(),
+        BuildProgress::ClusterizeDatasets => "clustering documents".to_string(),
+        BuildProgress::BuildExperts { current, total } => {
+            format!(
+                "experts: {current}/{total}{}",
+                pct(*current as u64, *total as u64)
+            )
+        }
+        BuildProgress::Done => "finalizing".to_string(),
+    }
 }
 
 fn commands() -> Vec<CreateCommand> {

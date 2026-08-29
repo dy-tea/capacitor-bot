@@ -16,8 +16,10 @@ pub type JobId = u64;
 /// A submitted training job with handles to its progress stream and result.
 pub struct TrainJob {
     pub id: JobId,
-    /// Progress updates `(expert_index, total_experts)`.
-    pub progress: mpsc::Receiver<(usize, usize)>,
+    /// Progress updates reported by the underlying `capacitor` build, one event
+    /// per phase (reading files, pre-tokenizing, fitting the tokenizer, building
+    /// tokens map / shared transitions, clustering, experts, …).
+    pub progress: mpsc::Receiver<BuildProgress>,
     /// Resolves to the built model (or an error) once training finishes.
     pub result: oneshot::Receiver<anyhow::Result<Arc<Model>>>,
 }
@@ -27,7 +29,7 @@ struct TrainRequest {
     recipe: Recipe,
     /// Where to persist the resulting model binary.
     output_path: PathBuf,
-    progress: mpsc::Sender<(usize, usize)>,
+    progress: mpsc::Sender<BuildProgress>,
     done: oneshot::Sender<anyhow::Result<Arc<Model>>>,
 }
 
@@ -162,15 +164,23 @@ fn build_to_path(
     id: JobId,
     recipe: Recipe,
     output_path: &PathBuf,
-    progress: &mpsc::Sender<(usize, usize)>,
+    progress: &mpsc::Sender<BuildProgress>,
 ) -> anyhow::Result<Arc<Model>> {
-    log_progress(id, progress, 0, recipe.experts.num_total);
+    // Seed the stream with an initial "experts 0/N" so the client has a
+    // percentage baseline for the first phase, then forward every build event.
+    if recipe.experts.num_total > 0 {
+        log_progress(
+            id,
+            progress,
+            BuildProgress::BuildExperts {
+                current: 0,
+                total: recipe.experts.num_total,
+            },
+        );
+    }
 
-    let model = build(recipe, |build_progress| match build_progress {
-        BuildProgress::BuildExperts { current, total } => {
-            log_progress(id, progress, current, total);
-        }
-        _ => {}
+    let model = build(recipe, |build_progress| {
+        log_progress(id, progress, build_progress);
     })?;
 
     let bytes = model.into_bytes();
@@ -182,10 +192,6 @@ fn build_to_path(
     Ok(Arc::new(model))
 }
 
-fn log_progress(_id: JobId, tx: &mpsc::Sender<(usize, usize)>, curr: usize, total: usize) {
-    if total == 0 {
-        return;
-    }
-
-    let _ = tx.try_send((curr, total));
+fn log_progress(_id: JobId, tx: &mpsc::Sender<BuildProgress>, event: BuildProgress) {
+    let _ = tx.try_send(event);
 }
