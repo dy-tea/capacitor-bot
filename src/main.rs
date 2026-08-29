@@ -445,6 +445,10 @@ impl Bot {
         };
         let source_name = source.name().to_string();
 
+        cmd.defer(ctx).await?;
+
+        let mut token_expired = false;
+
         let (recipe, document_count, dataset_paths) = match build_recipe(
             &self.data,
             namespace,
@@ -454,19 +458,26 @@ impl Bot {
         ) {
             Ok(Some(config)) => config,
             Ok(None) => {
-                reply(
+                deliver_update(
                     ctx,
                     cmd,
-                    format!(
+                    &mut token_expired,
+                    &format!(
                         "No usable {source_kind} `{source_name}` (unknown, empty, or \
-                         split into zero documents).",
+                         split into zero documents)."
                     ),
                 )
                 .await?;
                 return Ok(());
             }
             Err(err) => {
-                reply(ctx, cmd, format!("Could not build training config: {err}")).await?;
+                deliver_update(
+                    ctx,
+                    cmd,
+                    &mut token_expired,
+                    &format!("Could not build training config: {err}"),
+                )
+                .await?;
                 return Ok(());
             }
         };
@@ -482,30 +493,52 @@ impl Bot {
 
         let output_path = models_dir.join(format!("{model_name}.capacitor"));
 
-        let mut job = self
+        let mut job = match self
             .data
             .trainer
             .submit(namespace, recipe, output_path.clone())
-            .await?;
-
-        cmd.defer(ctx).await?;
+            .await
+        {
+            Ok(job) => job,
+            Err(err) => {
+                deliver_update(
+                    ctx,
+                    cmd,
+                    &mut token_expired,
+                    &format!("Could not start training: {err}"),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
 
         let mut message = format!(
-            "Training `{model_name}` (job `#{}`) on {document_count} documents: {total_experts} experts / {active_experts} active / {centroids} centroids...",
+            "Training `{model_name}` (job `#{}`) on {document_count} documents: \
+             {total_experts} experts / {active_experts} active / {centroids} centroids...",
             job.id
         );
-        cmd.edit_response(ctx, EditInteractionResponse::new().content(&message))
-            .await?;
+        deliver_update(ctx, cmd, &mut token_expired, &message).await?;
+
+        let mut last_phase: &str = "";
+        let mut last_update = std::time::Instant::now();
+        let min_interval = std::time::Duration::from_secs(2);
 
         loop {
             if let Ok(event) = job.progress.try_recv() {
-                message = format!(
-                    "Training `{model_name}` (job `#{}`): {}",
-                    job.id,
-                    progress_phase(&event),
-                );
-                cmd.edit_response(ctx, EditInteractionResponse::new().content(&message))
-                    .await?;
+                let phase = progress_phase_label(&event);
+                let phase_changed = phase != last_phase;
+                last_phase = phase;
+
+                let fresh = last_update.elapsed() >= min_interval;
+                if phase_changed || (fresh && !token_expired) {
+                    message = format!(
+                        "Training `{model_name}` (job `#{}`): {}",
+                        job.id,
+                        progress_phase(&event),
+                    );
+                    deliver_update(ctx, cmd, &mut token_expired, &message).await?;
+                    last_update = std::time::Instant::now();
+                }
             } else {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
@@ -515,8 +548,8 @@ impl Bot {
             }
         }
 
-        match job.result.await? {
-            Ok(_) => {
+        let outcome = match job.result.await {
+            Ok(Ok(_)) => {
                 let meta = ModelMeta {
                     name: model_name.clone(),
                     path: output_path,
@@ -535,20 +568,16 @@ impl Bot {
                     .unwrap()
                     .register_model(namespace, meta)?;
 
-                cmd.edit_response(ctx, EditInteractionResponse::new().content(format!(
-                    "Model `{model_name}` trained and saved. Query it with `/query model:{model_name} prompt:<your prompt>`."
-                ))).await?;
-            }
-
-            Err(err) => {
-                cmd.edit_response(
-                    ctx,
-                    EditInteractionResponse::new()
-                        .content(format!("Training `{model_name}` failed: {err}")),
+                format!(
+                    "Model `{model_name}` trained and saved. Query it with \
+                     `/query model:{model_name} prompt:<your prompt>`."
                 )
-                .await?;
             }
-        }
+            Ok(Err(err)) => format!("Training `{model_name}` failed: {err}"),
+            Err(_) => format!("Training `{model_name}` was aborted before completing."),
+        };
+
+        deliver_update(ctx, cmd, &mut token_expired, &outcome).await?;
 
         Ok(())
     }
@@ -800,6 +829,35 @@ async fn reply(
     )
     .await
     .map_err(anyhow::Error::from)?;
+
+    Ok(())
+}
+
+/// Report a training status line. While the interaction token is still valid
+/// (the first ~15 minutes) this edits the deferred response; once that stops
+/// working it posts a fresh channel message instead, which is independent of the
+/// interaction token and so survives trainings that outlive the token lifetime.
+async fn deliver_update(
+    ctx: &Context,
+    cmd: &CommandInteraction,
+    token_expired: &mut bool,
+    msg: &str,
+) -> anyhow::Result<()> {
+    if !*token_expired {
+        if cmd
+            .edit_response(ctx, EditInteractionResponse::new().content(msg))
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        *token_expired = true;
+    }
+
+    cmd.channel_id
+        .send_message(ctx, CreateMessage::new().content(msg))
+        .await?;
 
     Ok(())
 }
@@ -1105,6 +1163,21 @@ fn progress_phase(event: &BuildProgress) -> String {
     }
 }
 
+/// Stable, copyable label for a build phase. Used to detect phase transitions so
+/// progress updates aren't posted on every tick of a high-frequency phase.
+fn progress_phase_label(event: &BuildProgress) -> &'static str {
+    match event {
+        BuildProgress::ReadFiles { .. } => "read_files",
+        BuildProgress::PreTokenize { .. } => "pre_tokenize",
+        BuildProgress::FitTokenizer { .. } => "fit_tokenizer",
+        BuildProgress::BuildTokensMap => "tokens_map",
+        BuildProgress::BuildSharedTransitions => "shared_transitions",
+        BuildProgress::ClusterizeDatasets => "clusterize",
+        BuildProgress::BuildExperts { .. } => "experts",
+        BuildProgress::Done => "done",
+    }
+}
+
 fn commands() -> Vec<CreateCommand> {
     vec![
         CreateCommand::new("dataset")
@@ -1123,11 +1196,6 @@ fn commands() -> Vec<CreateCommand> {
                     )
                     .required(true),
                 )
-                .add_sub_option(CreateCommandOption::new(
-                    CommandOptionType::String,
-                    "split",
-                    "Optional delimiter to split documents on",
-                ))
                 .add_sub_option(CreateCommandOption::new(
                     CommandOptionType::String,
                     "name",

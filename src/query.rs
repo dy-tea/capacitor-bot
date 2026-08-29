@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::Semaphore;
 
 use capacitor::model::Model;
-use capacitor::{generate, load};
+use capacitor::{generator, load};
 
 use crate::store::ModelMeta;
 
@@ -121,10 +121,14 @@ impl QueryEngine {
 
         let model = self.load_cached(namespace, &meta).await?;
 
-        tokio::task::spawn_blocking(move || {
-            let mut buf = Vec::new();
-            generate(&model, &prompt, &mut buf)?;
-            Ok(String::from_utf8_lossy(&buf).to_string())
+        tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let mut tokens = Vec::new();
+
+            for token in generator(&model, prompt.as_str())? {
+                tokens.extend_from_slice(&token);
+            }
+
+            Ok(String::from_utf8_lossy(&tokens).to_string())
         })
         .await
         .map_err(anyhow::Error::from)?
