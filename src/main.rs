@@ -14,6 +14,22 @@ mod jobs;
 mod query;
 mod store;
 
+/// What to train on: either a raw uploaded dataset (treated as a corpus) or a
+/// capacitorfile recipe (which references other uploaded datasets).
+enum TrainSource {
+    Dataset(String),
+    Capacitorfile(String),
+}
+
+impl TrainSource {
+    fn name(&self) -> &str {
+        match self {
+            TrainSource::Dataset(n) => n,
+            TrainSource::Capacitorfile(n) => n,
+        }
+    }
+}
+
 struct Data {
     store: Arc<Mutex<Store>>,
     trainer: Trainer,
@@ -83,10 +99,12 @@ impl EventHandler for Bot {
 
         let result = match cmd.data.name.as_str() {
             "upload" => self.upload(&ctx, &cmd).await,
+            "capacitorfile" => self.capacitorfile_upload(&ctx, &cmd).await,
             "train" => self.train(&ctx, &cmd).await,
             "query" => self.query(&ctx, &cmd).await,
             "list" => self.list(&ctx, &cmd).await,
             "datasets" => self.datasets(&ctx, &cmd).await,
+            "capacitorfiles" => self.capacitorfiles(&ctx, &cmd).await,
             "show" => self.show(&ctx, &cmd).await,
             "delete" => self.delete(&ctx, &cmd).await,
             "about" => self.about(&ctx, &cmd).await,
@@ -120,12 +138,18 @@ impl Bot {
 
         let bytes = dataset.download().await?;
 
-        let saved =
-            self.data
-                .store
-                .lock()
-                .unwrap()
-                .save_dataset(namespace, &dataset.filename, &bytes)?;
+        // An explicit `name` overrides the attachment filename, letting users
+        // pick a stable identifier and avoid `unique_path` suffixes.
+        let name = option_str(&cmd.data.options, "name")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| dataset.filename.clone());
+
+        let saved = self
+            .data
+            .store
+            .lock()
+            .unwrap()
+            .save_dataset(namespace, &name, &bytes)?;
 
         let file_name = saved
             .file_name()
@@ -146,6 +170,53 @@ impl Bot {
         Ok(())
     }
 
+    async fn capacitorfile_upload(
+        &self,
+        ctx: &Context,
+        cmd: &CommandInteraction,
+    ) -> anyhow::Result<()> {
+        let namespace = namespace(cmd);
+
+        let Some(attachment) = cmd.data.resolved.attachments.values().next() else {
+            reply(ctx, cmd, "Please attach a capacitorfile recipe to upload.").await?;
+            return Ok(());
+        };
+
+        let bytes = attachment.download().await?;
+
+        // An explicit `name` overrides the attachment filename, letting users
+        // pick a stable identifier and avoid `unique_path` suffixes.
+        let name = option_str(&cmd.data.options, "name")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| attachment.filename.clone());
+
+        let saved = self
+            .data
+            .store
+            .lock()
+            .unwrap()
+            .save_capacitorfile(namespace, &name, &bytes)?;
+
+        let file_name = saved
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("capacitorfile")
+            .to_string();
+
+        reply(
+            ctx,
+            cmd,
+            format!(
+                "Uploaded capacitorfile as `{file_name}` ({} bytes). Use it with \
+                 `/train capacitorfile:{file_name}`.",
+                bytes.len()
+            ),
+        )
+        .await?;
+
+        Ok(())
+    }
+
     async fn train(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
         let namespace = namespace(cmd);
 
@@ -154,21 +225,49 @@ impl Bot {
             return Ok(());
         };
 
-        let Some(dataset_name) = option_str(&cmd.data.options, "dataset") else {
-            reply(ctx, cmd, "Missing required `dataset` option.").await?;
+        // Exactly one of `dataset` (raw corpus) or `capacitorfile` (recipe) may
+        // be supplied. They are mutually exclusive so the train selector never
+        // mixes the two concepts.
+        let source = option_str(&cmd.data.options, "capacitorfile")
+            .map(TrainSource::Capacitorfile)
+            .or_else(|| option_str(&cmd.data.options, "dataset").map(TrainSource::Dataset));
+
+        let Some(source) = source else {
+            reply(
+                ctx,
+                cmd,
+                "Missing input. Provide either `dataset` (a raw corpus to train on \
+                 directly) or `capacitorfile` (a recipe referencing uploaded datasets).",
+            )
+            .await?;
             return Ok(());
         };
 
-        let (recipe, document_count) = match build_recipe(
+        // Capture identifying info before `source` is moved into `build_recipe`.
+        let source_kind = match &source {
+            TrainSource::Dataset(_) => "dataset",
+            TrainSource::Capacitorfile(_) => "capacitorfile",
+        };
+        let source_name = source.name().to_string();
+
+        let (recipe, document_count, dataset_paths) = match build_recipe(
             &self.data,
             namespace,
             &model_name,
-            &dataset_name,
+            source,
             &cmd.data.options,
         ) {
             Ok(Some(config)) => config,
             Ok(None) => {
-                reply(ctx, cmd, format!("No usable dataset `{dataset_name}` (unknown, empty, or split into zero documents). Upload one first with `/upload`.")).await?;
+                reply(
+                    ctx,
+                    cmd,
+                    format!(
+                        "No usable {source_kind} `{source_name}` (unknown, empty, or \
+                         split into zero documents).",
+                    ),
+                )
+                .await?;
                 return Ok(());
             }
             Err(err) => {
@@ -226,7 +325,7 @@ impl Bot {
                 let meta = ModelMeta {
                     name: model_name.clone(),
                     path: output_path,
-                    datasets: vec![models_dir.join(format!("{dataset_name}.dataset"))],
+                    datasets: dataset_paths,
                     owner: namespace,
                     created_at: std::time::UNIX_EPOCH
                         .elapsed()
@@ -383,38 +482,82 @@ impl Bot {
         Ok(())
     }
 
+    async fn capacitorfiles(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
+        let namespace = namespace(cmd);
+        let files = self
+            .data
+            .store
+            .lock()
+            .unwrap()
+            .list_capacitorfiles(namespace);
+
+        if files.is_empty() {
+            reply(
+                ctx,
+                cmd,
+                "No capacitorfiles uploaded in this server yet. Use `/capacitorfile`.",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let lines = files
+            .iter()
+            .map(|p| {
+                let name = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("capacitorfile");
+                format!(
+                    "- `{name}` ({} bytes)",
+                    p.metadata().map(|m| m.len()).unwrap_or(0)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        reply(ctx, cmd, format!("Capacitorfiles in this server:\n{lines}")).await?;
+
+        Ok(())
+    }
+
     async fn autocomplete(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
         let namespace = namespace(cmd);
 
-        let Some(partial) = cmd
-            .data
-            .options
-            .iter()
-            .find_map(|option| match &option.value {
-                CommandDataOptionValue::Autocomplete { value, .. } => Some(value),
-                _ => None,
-            })
-        else {
+        // Find the option currently being autocompleted, noting *which* option
+        // it is so we can offer the right set of names: a dataset selector must
+        // never mix raw datasets with capacitorfile recipes, and a model
+        // selector must never show either.
+        let Some((option_name, partial)) = cmd.data.options.iter().find_map(|option| match &option
+            .value
+        {
+            CommandDataOptionValue::Autocomplete { value, .. } => {
+                Some((option.name.clone(), value.clone()))
+            }
+            _ => None,
+        }) else {
             return Ok(());
         };
 
         let query = partial.to_lowercase();
 
-        let names = {
+        let names: Vec<String> = {
             let store = self.data.store.lock().unwrap();
 
-            if cmd.data.name == "train" {
-                store
+            match (cmd.data.name.as_str(), option_name.as_str()) {
+                ("train", "dataset") => store
                     .list_datasets(namespace)
                     .into_iter()
                     .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned))
-                    .collect::<Vec<_>>()
-            } else {
-                store
-                    .list(namespace)
+                    .collect(),
+                ("train", "capacitorfile") => store
+                    .list_capacitorfiles(namespace)
                     .into_iter()
-                    .map(|m| m.name)
-                    .collect::<Vec<_>>()
+                    .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned))
+                    .collect(),
+                // Any other autocomplete (query/show/delete `model`) is a model
+                // name selector.
+                _ => store.list(namespace).into_iter().map(|m| m.name).collect(),
             }
         };
 
@@ -512,7 +655,8 @@ impl Bot {
             ctx,
             cmd,
             "**Capacitor bot**\n\
-             Commands: `/upload`, `/train`, `/query`, `/list`, `/datasets`, `/show`, `/delete`.",
+             Commands: `/upload`, `/capacitorfile`, `/train`, `/query`, `/list`, \
+             `/datasets`, `/capacitorfiles`, `/show`, `/delete`.",
         )
         .await?;
 
@@ -584,27 +728,45 @@ fn build_recipe(
     data: &Data,
     namespace: u64,
     model_name: &str,
-    dataset_name: &str,
+    source: TrainSource,
     options: &[CommandDataOption],
-) -> anyhow::Result<Option<(Recipe, usize)>> {
-    let dataset_path = {
-        let store = data.store.lock().unwrap();
-        match store.find_dataset(namespace, dataset_name) {
-            Some(path) => path,
-            None => return Ok(None),
+) -> anyhow::Result<Option<(Recipe, usize, Vec<PathBuf>)>> {
+    // What the user selected determines how the file is interpreted: a
+    // capacitorfile is always a recipe (its `File`/`Split` lines reference
+    // other uploaded datasets), while a dataset is always a raw corpus. This is
+    // chosen by *where* the file lives, not by sniffing its contents, so the
+    // train selector is unambiguous.
+    match source {
+        TrainSource::Capacitorfile(name) => {
+            let path = {
+                let store = data.store.lock().unwrap();
+                match store.find_capacitorfile(namespace, &name) {
+                    Some(path) => path,
+                    None => return Ok(None),
+                }
+            };
+
+            let raw = std::fs::read_to_string(&path)?;
+
+            let recipe = Recipe::from_str(&raw).map_err(|err| {
+                anyhow::anyhow!("`{name}` did not parse as a capacitorfile recipe: {err}")
+            })?;
+
+            resolve_recipe(data, namespace, model_name, recipe, options)
         }
-    };
 
-    let raw = std::fs::read_to_string(&dataset_path)?;
+        TrainSource::Dataset(name) => {
+            let path = {
+                let store = data.store.lock().unwrap();
+                match store.find_dataset(namespace, &name) {
+                    Some(path) => path,
+                    None => return Ok(None),
+                }
+            };
 
-    // A dataset whose contents parse as a capacitorfile recipe is treated as
-    // a recipe; its `File`/`Split` paths are resolved against uploaded
-    // datasets. Any other text is a raw corpus.
-    if let Ok(recipe) = Recipe::from_str(&raw) {
-        return resolve_recipe(data, namespace, model_name, recipe, options);
+            build_from_corpus(model_name, &path, options)
+        }
     }
-
-    build_from_corpus(model_name, &dataset_path, options)
 }
 
 /// Build a training configuration from a capacitorfile recipe, resolving its
@@ -615,8 +777,9 @@ fn resolve_recipe(
     model_name: &str,
     mut recipe: Recipe,
     options: &[CommandDataOption],
-) -> anyhow::Result<Option<(Recipe, usize)>> {
+) -> anyhow::Result<Option<(Recipe, usize, Vec<PathBuf>)>> {
     let mut total_documents = 0usize;
+    let mut dataset_paths: Vec<PathBuf> = Vec::new();
 
     for file in &mut recipe.files {
         let Some(file_name) = file.path.file_name().and_then(|n| n.to_str()) else {
@@ -636,8 +799,9 @@ fn resolve_recipe(
             }
         };
 
-        file.path = resolved;
+        file.path = resolved.clone();
         total_documents += count_documents(&file.path, &file.delimiter)?;
+        dataset_paths.push(resolved);
     }
 
     if total_documents == 0 {
@@ -674,7 +838,7 @@ fn resolve_recipe(
         .keys
         .insert(String::from("model.name"), model_name.to_string());
 
-    Ok(Some((recipe, total_documents)))
+    Ok(Some((recipe, total_documents, dataset_paths)))
 }
 
 /// Build a training configuration from a raw corpus dataset (no recipe).
@@ -682,7 +846,7 @@ fn build_from_corpus(
     model_name: &str,
     dataset_path: &std::path::Path,
     options: &[CommandDataOption],
-) -> anyhow::Result<Option<(Recipe, usize)>> {
+) -> anyhow::Result<Option<(Recipe, usize, Vec<PathBuf>)>> {
     let delimiter = option_str(options, "split").unwrap_or_else(|| String::from("<|document|>"));
 
     let document_count = count_documents(dataset_path, &delimiter)?;
@@ -730,7 +894,11 @@ fn build_from_corpus(
             .insert(String::from("model.inference.max_tokens"), v.to_string());
     }
 
-    Ok(Some((recipe, document_count)))
+    Ok(Some((
+        recipe,
+        document_count,
+        vec![dataset_path.to_path_buf()],
+    )))
 }
 
 /// Clamp `total_experts`, `active_experts` and `centroids` so that
@@ -791,6 +959,26 @@ fn commands() -> Vec<CreateCommand> {
                 CommandOptionType::String,
                 "split",
                 "Optional delimiter to split documents on",
+            ))
+            .add_option(CreateCommandOption::new(
+                CommandOptionType::String,
+                "name",
+                "Custom name for the dataset (avoids collisions with existing ones)",
+            )),
+        CreateCommand::new("capacitorfile")
+            .description("Upload a capacitorfile recipe referencing uploaded datasets")
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::Attachment,
+                    "file",
+                    "The capacitorfile recipe to upload",
+                )
+                .required(true),
+            )
+            .add_option(CreateCommandOption::new(
+                CommandOptionType::String,
+                "name",
+                "Custom name for the capacitorfile (avoids collisions with existing ones)",
             )),
         CreateCommand::new("train")
             .description("Train a model from a corpus or a capacitorfile recipe")
@@ -806,9 +994,16 @@ fn commands() -> Vec<CreateCommand> {
                 CreateCommandOption::new(
                     CommandOptionType::String,
                     "dataset",
-                    "Name of an uploaded dataset",
+                    "Name of an uploaded dataset (raw corpus) to train on",
                 )
-                .required(true)
+                .set_autocomplete(true),
+            )
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "capacitorfile",
+                    "Name of an uploaded capacitorfile recipe to train from",
+                )
                 .set_autocomplete(true),
             )
             .add_option(CreateCommandOption::new(
@@ -866,6 +1061,8 @@ fn commands() -> Vec<CreateCommand> {
             )),
         CreateCommand::new("list").description("List models available in this server"),
         CreateCommand::new("datasets").description("List datasets uploaded in this server"),
+        CreateCommand::new("capacitorfiles")
+            .description("List capacitorfile recipes uploaded in this server"),
         CreateCommand::new("show")
             .description("Show details of a model")
             .add_option(

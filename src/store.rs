@@ -61,6 +61,16 @@ impl Store {
         self.namespace_dir(namespace).join("models")
     }
 
+    /// Directory holding uploaded capacitorfile recipes for a namespace.
+    ///
+    /// Kept separate from `datasets_dir` so that raw corpora and recipe files
+    /// never share a selector in `/train`: a dataset is always trained on
+    /// directly, while a capacitorfile is always interpreted as a recipe that
+    /// references (other) uploaded datasets.
+    pub fn capacitorfiles_dir(&self, namespace: u64) -> PathBuf {
+        self.namespace_dir(namespace).join("capacitorfiles")
+    }
+
     // -- Datasets ---------------------------------------------------------
 
     /// Persist an uploaded attachment as a dataset and return its absolute path.
@@ -108,6 +118,60 @@ impl Store {
     /// List the dataset files uploaded for a namespace.
     pub fn list_datasets(&self, namespace: u64) -> Vec<PathBuf> {
         let dir = self.datasets_dir(namespace);
+
+        std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .collect()
+    }
+
+    // -- Capacitorfiles -----------------------------------------------------
+
+    /// Persist an uploaded capacitorfile recipe and return its absolute path.
+    pub fn save_capacitorfile(
+        &self,
+        namespace: u64,
+        filename: &str,
+        bytes: &[u8],
+    ) -> anyhow::Result<PathBuf> {
+        let dir = self.capacitorfiles_dir(namespace);
+        std::fs::create_dir_all(&dir)?;
+
+        let safe = sanitize_filename(filename);
+        let path = unique_path(dir.join(&safe));
+
+        std::fs::write(&path, bytes)?;
+
+        Ok(path)
+    }
+
+    /// Look up a capacitorfile by name (exact, sanitized). Returns `None` if
+    /// no matching recipe exists.
+    pub fn find_capacitorfile(&self, namespace: u64, name: &str) -> Option<PathBuf> {
+        let desired = sanitize_filename(name);
+        let dir = self.capacitorfiles_dir(namespace);
+
+        let entries = std::fs::read_dir(&dir).ok()?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+
+            if file_name == desired {
+                return Some(path);
+            }
+        }
+
+        None
+    }
+
+    /// List the capacitorfile recipes uploaded for a namespace.
+    pub fn list_capacitorfiles(&self, namespace: u64) -> Vec<PathBuf> {
+        let dir = self.capacitorfiles_dir(namespace);
 
         std::fs::read_dir(&dir)
             .into_iter()
