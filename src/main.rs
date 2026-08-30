@@ -105,7 +105,7 @@ impl EventHandler for Bot {
 
         let result = match cmd.data.name.as_str() {
             "dataset" => self.dataset(&ctx, &cmd).await,
-            "capacitorfile" => self.capacitorfile(&ctx, &cmd).await,
+            "recipe" => self.recipe(&ctx, &cmd).await,
             "train" => self.train(&ctx, &cmd).await,
             "query" => self.query(&ctx, &cmd).await,
             "list" => self.list(&ctx, &cmd).await,
@@ -233,35 +233,30 @@ impl Bot {
         Ok(())
     }
 
-    async fn capacitorfile(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
-        // `/capacitorfile` is a command group; dispatch on its subcommand.
+    async fn recipe(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
+        // `/recipe` is a command group; dispatch on its subcommand.
         let Some(sub) = cmd.data.options.first() else {
-            reply(ctx, cmd, "Usage: `/capacitorfile upload|list|info`.").await?;
+            reply(ctx, cmd, "Usage: `/recipe upload|list|info`.").await?;
             return Ok(());
         };
 
         let CommandDataOptionValue::SubCommand(opts) = &sub.value else {
-            reply(ctx, cmd, "Usage: `/capacitorfile upload|list|info`.").await?;
+            reply(ctx, cmd, "Usage: `/recipe upload|list|info`.").await?;
             return Ok(());
         };
 
         match sub.name.as_str() {
-            "upload" => self.capacitorfile_upload(ctx, cmd, opts).await,
-            "list" => self.capacitorfile_list(ctx, cmd).await,
-            "info" => self.capacitorfile_info(ctx, cmd, opts).await,
+            "upload" => self.recipe_upload(ctx, cmd, opts).await,
+            "list" => self.recipe_list(ctx, cmd).await,
+            "info" => self.recipe_info(ctx, cmd, opts).await,
             other => {
-                reply(
-                    ctx,
-                    cmd,
-                    format!("Unknown capacitorfile subcommand `{other}`."),
-                )
-                .await?;
+                reply(ctx, cmd, format!("Unknown recipe subcommand `{other}`.")).await?;
                 Ok(())
             }
         }
     }
 
-    async fn capacitorfile_upload(
+    async fn recipe_upload(
         &self,
         ctx: &Context,
         cmd: &CommandInteraction,
@@ -270,7 +265,7 @@ impl Bot {
         let namespace = namespace(cmd);
 
         let Some(attachment) = cmd.data.resolved.attachments.values().next() else {
-            reply(ctx, cmd, "Please attach a capacitorfile recipe to upload.").await?;
+            reply(ctx, cmd, "Please attach a recipe to upload.").await?;
             return Ok(());
         };
 
@@ -299,8 +294,8 @@ impl Bot {
             ctx,
             cmd,
             format!(
-                "Uploaded capacitorfile as `{file_name}` ({} bytes). Use it with \
-                 `/train capacitorfile:{file_name}`.",
+                "Uploaded recipe as `{file_name}` ({} bytes). Use it with \
+                 `/train recipe:{file_name}`.",
                 bytes.len()
             ),
         )
@@ -309,11 +304,7 @@ impl Bot {
         Ok(())
     }
 
-    async fn capacitorfile_list(
-        &self,
-        ctx: &Context,
-        cmd: &CommandInteraction,
-    ) -> anyhow::Result<()> {
+    async fn recipe_list(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
         let namespace = namespace(cmd);
         let files = self
             .data
@@ -352,7 +343,7 @@ impl Bot {
         Ok(())
     }
 
-    async fn capacitorfile_info(
+    async fn recipe_info(
         &self,
         ctx: &Context,
         cmd: &CommandInteraction,
@@ -698,7 +689,7 @@ impl Bot {
             let store = self.data.store.lock().unwrap();
 
             match (cmd.data.name.as_str(), option_name) {
-                ("train", "dataset") | ("capacitorfile", "name") => store
+                ("train", "dataset") | ("recipe", "name") => store
                     .list_capacitorfiles(namespace)
                     .into_iter()
                     .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned))
@@ -808,7 +799,7 @@ impl Bot {
             ctx,
             cmd,
             "**Capacitor bot**\n\
-             Commands: `/dataset` (`upload`/`list`), `/capacitorfile` (`upload`/`list`/`info`), \
+             Commands: `/dataset` (`upload`/`list`), `/recipe` (`upload`/`list`/`info`), \
              `/train`, `/query`, `/list`, `/show`, `/delete`.",
         )
         .await?;
@@ -1277,7 +1268,7 @@ fn commands() -> Vec<CreateCommand> {
             .add_option(
                 CreateCommandOption::new(
                     CommandOptionType::String,
-                    "capacitorfile",
+                    "recipe",
                     "Name of an uploaded capacitorfile recipe to train from",
                 )
                 .set_autocomplete(true),
