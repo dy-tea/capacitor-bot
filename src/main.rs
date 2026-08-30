@@ -76,19 +76,9 @@ async fn main() -> anyhow::Result<()> {
 #[serenity::async_trait]
 impl EventHandler for Bot {
     async fn ready(&self, ctx: Context, ready: Ready) {
-        let commands = commands();
-
-        if let Err(err) = ctx.http.create_global_commands(&commands).await {
-            eprintln!("failed to register global commands: {err}");
-        }
-
         let guild_count = ready.guilds.len();
 
-        for guild in &ready.guilds {
-            if let Err(err) = ctx.http.create_guild_commands(guild.id, &commands).await {
-                eprintln!("failed to register commands for guild {}: {err}", guild.id);
-            }
-        }
+        sync_commands(&ctx, &ready).await;
 
         println!("capacitor-bot ready and serving {guild_count} guilds");
     }
@@ -1172,6 +1162,42 @@ fn progress_phase_label(event: &BuildProgress) -> &'static str {
         BuildProgress::ClusterizeDatasets => "clusterize",
         BuildProgress::BuildExperts { .. } => "experts",
         BuildProgress::Done => "done",
+    }
+}
+
+/// Re-register the bot's command set on every launch so renames, removals and
+/// additions all take effect from a clean slate.
+async fn sync_commands(ctx: &Context, ready: &Ready) {
+    let commands = commands();
+    let app_id = ready.application.id;
+
+    if let Ok(existing) = ctx.http.get_global_commands().await {
+        for command in existing.iter().filter(|c| c.application_id == app_id) {
+            if let Err(err) = ctx.http.delete_global_command(command.id).await {
+                eprintln!("failed to delete global command {}: {err}", command.id);
+            }
+        }
+    }
+
+    if let Err(err) = ctx.http.create_global_commands(&commands).await {
+        eprintln!("failed to register global commands: {err}");
+    }
+
+    for guild in &ready.guilds {
+        if let Ok(existing) = ctx.http.get_guild_commands(guild.id).await {
+            for command in existing.iter().filter(|c| c.application_id == app_id) {
+                if let Err(err) = ctx.http.delete_guild_command(guild.id, command.id).await {
+                    eprintln!(
+                        "failed to delete guild command {} in guild {}: {err}",
+                        command.id, guild.id,
+                    );
+                }
+            }
+        }
+
+        if let Err(err) = ctx.http.create_guild_commands(guild.id, &commands).await {
+            eprintln!("failed to register commands for guild {}: {err}", guild.id);
+        }
     }
 }
 
