@@ -317,7 +317,7 @@ impl Bot {
             reply(
                 ctx,
                 cmd,
-                "No capacitorfiles uploaded in this server yet. Use `/capacitorfile upload`.",
+                "No recipes uploaded in this server yet. Use `/recipe upload`.",
             )
             .await?;
             return Ok(());
@@ -338,7 +338,7 @@ impl Bot {
             .collect::<Vec<_>>()
             .join("\n");
 
-        reply(ctx, cmd, format!("Capacitorfiles in this server:\n{lines}")).await?;
+        reply(ctx, cmd, format!("Recipe in this server:\n{lines}")).await?;
 
         Ok(())
     }
