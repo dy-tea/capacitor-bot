@@ -365,7 +365,7 @@ impl Bot {
             reply(
                 ctx,
                 cmd,
-                format!("No capacitorfile named `{name}` in this server."),
+                format!("No recipe named `{name}` in this server."),
             )
             .await?;
             return Ok(());
@@ -419,7 +419,7 @@ impl Bot {
         // Exactly one of `dataset` (raw corpus) or `capacitorfile` (recipe) may
         // be supplied. They are mutually exclusive so the train selector never
         // mixes the two concepts.
-        let source = option_str(&cmd.data.options, "capacitorfile")
+        let source = option_str(&cmd.data.options, "recipe")
             .map(TrainSource::Capacitorfile)
             .or_else(|| option_str(&cmd.data.options, "dataset").map(TrainSource::Dataset));
 
@@ -428,7 +428,7 @@ impl Bot {
                 ctx,
                 cmd,
                 "Missing input. Provide either `dataset` (a raw corpus to train on \
-                 directly) or `capacitorfile` (a recipe referencing uploaded datasets).",
+                 directly) or `recipe` (a recipe referencing uploaded datasets).",
             )
             .await?;
             return Ok(());
@@ -437,7 +437,7 @@ impl Bot {
         // Capture identifying info before `source` is moved into `build_recipe`.
         let source_kind = match &source {
             TrainSource::Dataset(_) => "dataset",
-            TrainSource::Capacitorfile(_) => "capacitorfile",
+            TrainSource::Capacitorfile(_) => "recipe",
         };
         let source_name = source.name().to_string();
 
@@ -1204,7 +1204,7 @@ fn commands() -> Vec<CreateCommand> {
                 "list",
                 "List datasets in this server",
             )),
-        CreateCommand::new("capacitorfile")
+        CreateCommand::new("recipe")
             .description("Manage capacitorfile recipes for this server")
             .add_option(
                 CreateCommandOption::new(
