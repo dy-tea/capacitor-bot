@@ -107,14 +107,12 @@ impl QueryEngine {
     }
 
     /// Generate a text response from `meta`'s model for `prompt`. Concurrency per
-    /// guild is bounded by the engine's configured capacity. `seed` is optional;
-    /// when `None` a random generator is used.
+    /// guild is bounded by the engine's configured capacity.
     pub async fn query(
         &self,
         namespace: u64,
         meta: ModelMeta,
         prompt: String,
-        _seed: Option<u64>,
     ) -> anyhow::Result<String> {
         let sem = self.semaphore(namespace);
         let _permit = sem.acquire().await.map_err(anyhow::Error::from)?;
