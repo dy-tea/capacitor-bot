@@ -77,6 +77,11 @@ async fn main() -> anyhow::Result<()> {
 impl EventHandler for Bot {
     async fn ready(&self, ctx: Context, ready: Ready) {
         let commands = commands();
+
+        if let Err(err) = ctx.http.create_global_commands(&commands).await {
+            eprintln!("failed to register global commands: {err}");
+        }
+
         let guild_count = ready.guilds.len();
 
         for guild in &ready.guilds {
@@ -812,6 +817,7 @@ impl Bot {
     }
 }
 
+/// Returns the storage namespace for an interaction.
 fn namespace(cmd: &CommandInteraction) -> u64 {
     cmd.guild_id
         .map(|g| g.get())
@@ -1179,7 +1185,7 @@ fn progress_phase_label(event: &BuildProgress) -> &'static str {
 }
 
 fn commands() -> Vec<CreateCommand> {
-    vec![
+    let commands = vec![
         CreateCommand::new("dataset")
             .description("Manage text datasets for this server")
             .add_option(
@@ -1345,5 +1351,15 @@ fn commands() -> Vec<CreateCommand> {
                     .set_autocomplete(true),
             ),
         CreateCommand::new("about").description("About this bot"),
-    ]
+    ];
+
+    commands.into_iter().map(user_app_command).collect()
+}
+
+fn user_app_command(cmd: CreateCommand) -> CreateCommand {
+    cmd.add_context(InteractionContext::Guild)
+        .add_context(InteractionContext::BotDm)
+        .add_context(InteractionContext::PrivateChannel)
+        .add_integration_type(InstallationContext::Guild)
+        .add_integration_type(InstallationContext::User)
 }
