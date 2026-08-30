@@ -189,6 +189,8 @@ impl Bot {
         };
 
         match sub.name.as_str() {
+            "create" => self.recipe_create(ctx, cmd, opts).await,
+            "edit" => self.recipe_edit(ctx, cmd, opts).await,
             "upload" => self.recipe_upload(ctx, cmd, opts).await,
             "list" => self.recipe_list(ctx, cmd).await,
             "info" => self.recipe_info(ctx, cmd, opts).await,
@@ -239,6 +241,101 @@ impl Bot {
             format!(
                 "Uploaded recipe as `{file_name}` ({}). Use it with \
                  `/train recipe:{file_name}`.",
+                format_size(bytes.len() as f64)
+            ),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn recipe_create(
+        &self,
+        ctx: &Context,
+        cmd: &CommandInteraction,
+        options: &[CommandDataOption],
+    ) -> anyhow::Result<()> {
+        let namespace = namespace(cmd);
+
+        let Some(content) = option_str(options, "content") else {
+            reply(ctx, cmd, "Missing required `content` option.").await?;
+            return Ok(());
+        };
+
+        let name = option_str(options, "name")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| String::from("recipe.capacitor"));
+
+        let bytes = content.into_bytes();
+
+        let saved = self
+            .data
+            .store
+            .lock()
+            .unwrap()
+            .save_capacitorfile(namespace, &name, &bytes)?;
+
+        let file_name = saved
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("capacitorfile")
+            .to_string();
+
+        reply(
+            ctx,
+            cmd,
+            format!(
+                "Created recipe `{file_name}` ({}). Use it with \
+                 `/train recipe:{file_name}`.",
+                format_size(bytes.len() as f64)
+            ),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn recipe_edit(
+        &self,
+        ctx: &Context,
+        cmd: &CommandInteraction,
+        options: &[CommandDataOption],
+    ) -> anyhow::Result<()> {
+        let namespace = namespace(cmd);
+
+        let Some(name) = option_str(options, "name") else {
+            reply(ctx, cmd, "Missing required `name` option.").await?;
+            return Ok(());
+        };
+
+        let Some(content) = option_str(options, "content") else {
+            reply(ctx, cmd, "Missing required `content` option.").await?;
+            return Ok(());
+        };
+
+        let path = {
+            let store = self.data.store.lock().unwrap();
+            store.find_capacitorfile(namespace, &name)
+        };
+
+        let Some(path) = path else {
+            reply(
+                ctx,
+                cmd,
+                format!("No recipe named `{name}` in this server."),
+            )
+            .await?;
+            return Ok(());
+        };
+
+        let bytes = content.into_bytes();
+        std::fs::write(&path, &bytes)?;
+
+        reply(
+            ctx,
+            cmd,
+            format!(
+                "Updated recipe `{name}` ({}).",
                 format_size(bytes.len() as f64)
             ),
         )
@@ -636,18 +733,11 @@ impl Bot {
             let store = self.data.store.lock().unwrap();
 
             match (cmd.data.name.as_str(), option_name) {
-                ("train", "dataset") | ("recipe", "name") => store
+                ("train", "recipe") | ("recipe", "name") => store
                     .list_capacitorfiles(namespace)
                     .into_iter()
                     .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned))
                     .collect(),
-                ("train", "capacitorfile") => store
-                    .list_capacitorfiles(namespace)
-                    .into_iter()
-                    .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned))
-                    .collect(),
-                // Any other autocomplete (query/show/delete `model`) is a model
-                // name selector.
                 _ => store.list(namespace).into_iter().map(|m| m.name).collect(),
             }
         };
@@ -746,7 +836,7 @@ impl Bot {
             ctx,
             cmd,
             "**Capacitor bot**\n\
-             Commands: `/dataset` (`upload`/`list`), `/recipe` (`upload`/`list`/`info`), \
+             Commands: `/dataset` (`upload`/`list`), `/recipe` (`create`/`edit`/`upload`/`list`/`info`), \
              `/train`, `/query`, `/list`, `/show`, `/delete`.",
         )
         .await?;
@@ -828,6 +918,50 @@ fn commands() -> Vec<CreateCommand> {
             )),
         CreateCommand::new("recipe")
             .description("Manage capacitorfile recipes for this server")
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::SubCommand,
+                    "create",
+                    "Create a capacitorfile recipe from text",
+                )
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "content",
+                        "The capacitorfile recipe content",
+                    )
+                    .required(true),
+                )
+                .add_sub_option(CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "name",
+                    "Custom name for the capacitorfile (avoids collisions)",
+                )),
+            )
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::SubCommand,
+                    "edit",
+                    "Edit an existing capacitorfile recipe",
+                )
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "name",
+                        "Name of the capacitorfile to edit",
+                    )
+                    .required(true)
+                    .set_autocomplete(true),
+                )
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "content",
+                        "New capacitorfile recipe content",
+                    )
+                    .required(true),
+                ),
+            )
             .add_option(
                 CreateCommandOption::new(
                     CommandOptionType::SubCommand,
