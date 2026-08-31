@@ -11,7 +11,9 @@ use crate::store::Store;
 mod bot;
 mod jobs;
 mod query;
+mod recipe_edit;
 mod store;
+mod util;
 
 fn parse_env<T: std::str::FromStr>(name: &str, default: T) -> anyhow::Result<T> {
     Ok(match std::env::var(name) {
@@ -36,18 +38,21 @@ async fn main() -> anyhow::Result<()> {
 
     let store = Arc::new(Mutex::new(Store::new(store_path)?));
 
-    let data = Arc::new(Data {
+    let data = Arc::new(Data::new(
         store,
-        trainer: Trainer::spawn(train_workers),
-        query: QueryEngine::new(query_capacity, cache_size),
-    });
+        Trainer::spawn(train_workers),
+        QueryEngine::new(query_capacity, cache_size),
+    ));
 
-    let mut client = Client::builder(&token, GatewayIntents::non_privileged())
-        .event_handler(Bot {
-            data: Arc::clone(&data),
-        })
-        .await
-        .map_err(anyhow::Error::from)?;
+    let mut client = Client::builder(
+        &token,
+        GatewayIntents::non_privileged() | GatewayIntents::MESSAGE_CONTENT,
+    )
+    .event_handler(Bot {
+        data: Arc::clone(&data),
+    })
+    .await
+    .map_err(anyhow::Error::from)?;
 
     client.start().await?;
 

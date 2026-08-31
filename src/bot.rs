@@ -9,12 +9,29 @@ use capacitor::recipe::Recipe;
 
 use crate::jobs::Trainer;
 use crate::query::QueryEngine;
+use crate::recipe_edit;
 use crate::store::{ModelMeta, Store};
+use crate::util::{clip, format_size};
 
 pub struct Data {
     pub store: Arc<Mutex<Store>>,
     pub trainer: Trainer,
     pub query: QueryEngine,
+    /// Maps the message id of a recipe reply to the file it is synced to, so
+    /// that `message_update` events can keep the recipe file in step with edits
+    /// to that message.
+    recipe_sessions: recipe_edit::RecipeSessions,
+}
+
+impl Data {
+    pub fn new(store: Arc<Mutex<Store>>, trainer: Trainer, query: QueryEngine) -> Self {
+        Self {
+            store,
+            trainer,
+            query,
+            recipe_sessions: recipe_edit::new_sessions(),
+        }
+    }
 }
 
 pub struct Bot {
@@ -29,6 +46,18 @@ impl EventHandler for Bot {
         sync_commands(&ctx, &ready).await;
 
         println!("capacitor-bot ready and serving {guild_count} guilds");
+    }
+
+    /// Keeps recipe files in sync when a user edits the message they replied
+    /// with a recipe to a `/recipe create` or `/recipe edit` prompt.
+    async fn message_update(
+        &self,
+        ctx: Context,
+        _old: Option<Message>,
+        _new: Option<Message>,
+        event: MessageUpdateEvent,
+    ) {
+        recipe_edit::sync_edited_message(&ctx, &self.data.recipe_sessions, &event).await;
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -257,38 +286,40 @@ impl Bot {
     ) -> anyhow::Result<()> {
         let namespace = namespace(cmd);
 
-        let Some(content) = option_str(options, "content") else {
-            reply(ctx, cmd, "Missing required `content` option.").await?;
-            return Ok(());
-        };
-
         let name = option_str(options, "name")
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| String::from("recipe.capacitor"));
 
-        let bytes = content.into_bytes();
-
-        let saved = self
-            .data
-            .store
-            .lock()
-            .unwrap()
-            .save_capacitorfile(namespace, &name, &bytes)?;
-
-        let file_name = saved
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("capacitorfile")
+        let prompt = "Reply to this message with the capacitorfile recipe content. \
+            Editing your reply will update the recipe file."
             .to_string();
 
-        reply(
+        let Some(reply) = recipe_edit::await_reply(ctx, cmd, prompt).await? else {
+            cmd.channel_id
+                .send_message(
+                    ctx,
+                    CreateMessage::new()
+                        .content("Timed out waiting for your reply. No recipe was saved."),
+                )
+                .await?;
+            return Ok(());
+        };
+
+        let content = recipe_edit::strip_fence(&reply.content);
+
+        let saved = self.data.store.lock().unwrap().save_capacitorfile(
+            namespace,
+            &name,
+            content.as_bytes(),
+        )?;
+
+        recipe_edit::register_session(
             ctx,
             cmd,
-            format!(
-                "Created recipe `{file_name}` ({}). Use it with \
-                 `/train recipe:{file_name}`.",
-                format_size(bytes.len() as f64)
-            ),
+            &self.data.recipe_sessions,
+            &reply,
+            saved,
+            &content,
         )
         .await?;
 
@@ -308,11 +339,6 @@ impl Bot {
             return Ok(());
         };
 
-        let Some(content) = option_str(options, "content") else {
-            reply(ctx, cmd, "Missing required `content` option.").await?;
-            return Ok(());
-        };
-
         let path = {
             let store = self.data.store.lock().unwrap();
             store.find_capacitorfile(namespace, &name)
@@ -328,18 +354,32 @@ impl Bot {
             return Ok(());
         };
 
-        let bytes = content.into_bytes();
-        std::fs::write(&path, &bytes)?;
+        let current = std::fs::read_to_string(&path)?;
 
-        reply(
-            ctx,
-            cmd,
-            format!(
-                "Updated recipe `{name}` ({}).",
-                format_size(bytes.len() as f64)
-            ),
-        )
-        .await?;
+        let prompt = format!(
+            "**Current recipe `{name}`**\n\nReply to this message with the updated \
+             capacitorfile recipe content. Editing your reply will update the \
+             recipe file.\n\n```\n{content}\n```",
+            content = clip(&current, 1800),
+        );
+
+        let Some(reply) = recipe_edit::await_reply(ctx, cmd, prompt).await? else {
+            cmd.channel_id
+                .send_message(
+                    ctx,
+                    CreateMessage::new()
+                        .content("Timed out waiting for your reply. The recipe was not changed."),
+                )
+                .await?;
+            return Ok(());
+        };
+
+        let content = recipe_edit::strip_fence(&reply.content);
+
+        std::fs::write(&path, content.as_bytes())?;
+
+        recipe_edit::register_session(ctx, cmd, &self.data.recipe_sessions, &reply, path, &content)
+            .await?;
 
         Ok(())
     }
@@ -922,15 +962,7 @@ fn commands() -> Vec<CreateCommand> {
                 CreateCommandOption::new(
                     CommandOptionType::SubCommand,
                     "create",
-                    "Create a capacitorfile recipe from text",
-                )
-                .add_sub_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::String,
-                        "content",
-                        "The capacitorfile recipe content",
-                    )
-                    .required(true),
+                    "Create a capacitorfile recipe by replying with its content",
                 )
                 .add_sub_option(CreateCommandOption::new(
                     CommandOptionType::String,
@@ -942,7 +974,7 @@ fn commands() -> Vec<CreateCommand> {
                 CreateCommandOption::new(
                     CommandOptionType::SubCommand,
                     "edit",
-                    "Edit an existing capacitorfile recipe",
+                    "Edit an existing capacitorfile recipe by replying",
                 )
                 .add_sub_option(
                     CreateCommandOption::new(
@@ -952,14 +984,6 @@ fn commands() -> Vec<CreateCommand> {
                     )
                     .required(true)
                     .set_autocomplete(true),
-                )
-                .add_sub_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::String,
-                        "content",
-                        "New capacitorfile recipe content",
-                    )
-                    .required(true),
                 ),
             )
             .add_option(
@@ -1102,18 +1126,6 @@ async fn sync_commands(ctx: &Context, ready: &Ready) {
     }
 }
 
-/// Format bytes string.
-pub fn format_size(size: f64) -> String {
-    if size > 1024.0 * 1024.0 * 1024.0 {
-        format!("{:.2} GB", size / 1024.0 / 1024.0 / 1024.0)
-    } else if size > 1024.0 * 1024.0 {
-        format!("{:.2} MB", size / 1024.0 / 1024.0)
-    } else if size > 1024.0 {
-        format!("{:.2} KB", size / 1024.0)
-    } else {
-        format!("{} B", size)
-    }
-}
 /// Report a training status line. While the interaction token is still valid
 /// (the first ~15 minutes) this edits the deferred response; once that stops
 /// working it posts a fresh channel message instead, which is independent of the
@@ -1141,16 +1153,6 @@ async fn deliver_update(
         .await?;
 
     Ok(())
-}
-
-fn clip(text: &str, max: usize) -> String {
-    let mut s: String = text.chars().take(max).collect();
-
-    if text.len() > s.len() {
-        s.push_str("\n... (truncated)");
-    }
-
-    s
 }
 
 fn build_recipe(
