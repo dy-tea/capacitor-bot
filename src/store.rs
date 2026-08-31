@@ -127,6 +127,18 @@ impl Store {
             .collect()
     }
 
+    /// Remove a dataset file for a namespace by name. Returns `true` if a file
+    /// was removed.
+    pub fn delete_dataset(&self, namespace: u64, name: &str) -> anyhow::Result<bool> {
+        let Some(path) = self.find_dataset(namespace, name) else {
+            return Ok(false);
+        };
+
+        std::fs::remove_file(&path)?;
+
+        Ok(true)
+    }
+
     // -- Capacitorfiles -----------------------------------------------------
 
     /// Persist an uploaded capacitorfile recipe and return its absolute path.
@@ -179,6 +191,18 @@ impl Store {
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
             .collect()
+    }
+
+    /// Remove a capacitorfile recipe for a namespace by name. Returns `true` if
+    /// a file was removed.
+    pub fn delete_capacitorfile(&self, namespace: u64, name: &str) -> anyhow::Result<bool> {
+        let Some(path) = self.find_capacitorfile(namespace, name) else {
+            return Ok(false);
+        };
+
+        std::fs::remove_file(&path)?;
+
+        Ok(true)
     }
 
     /// Record the name of the most recently queried model for a namespace.

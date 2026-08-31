@@ -102,18 +102,19 @@ impl Bot {
     async fn dataset(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
         // `/dataset` is a command group; dispatch on its subcommand.
         let Some(sub) = cmd.data.options.first() else {
-            reply(ctx, cmd, "Usage: `/dataset upload|list`.").await?;
+            reply(ctx, cmd, "Usage: `/dataset upload|list|delete`.").await?;
             return Ok(());
         };
 
         let CommandDataOptionValue::SubCommand(opts) = &sub.value else {
-            reply(ctx, cmd, "Usage: `/dataset upload|list`.").await?;
+            reply(ctx, cmd, "Usage: `/dataset upload|list|delete`.").await?;
             return Ok(());
         };
 
         match sub.name.as_str() {
             "upload" => self.dataset_upload(ctx, cmd, opts).await,
             "list" => self.dataset_list(ctx, cmd).await,
+            "delete" => self.dataset_delete(ctx, cmd, opts).await,
             other => {
                 reply(ctx, cmd, format!("Unknown dataset subcommand `{other}`.")).await?;
                 Ok(())
@@ -205,6 +206,40 @@ impl Bot {
         Ok(())
     }
 
+    async fn dataset_delete(
+        &self,
+        ctx: &Context,
+        cmd: &CommandInteraction,
+        options: &[CommandDataOption],
+    ) -> anyhow::Result<()> {
+        let namespace = namespace(cmd);
+
+        let Some(name) = option_str(options, "name") else {
+            reply(ctx, cmd, "Missing required `name` option.").await?;
+            return Ok(());
+        };
+
+        let removed = self
+            .data
+            .store
+            .lock()
+            .unwrap()
+            .delete_dataset(namespace, &name)?;
+
+        if removed {
+            reply(ctx, cmd, format!("Deleted dataset `{name}`.")).await?;
+        } else {
+            reply(
+                ctx,
+                cmd,
+                format!("No dataset named `{name}` in this server."),
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
     async fn recipe(&self, ctx: &Context, cmd: &CommandInteraction) -> anyhow::Result<()> {
         // `/recipe` is a command group; dispatch on its subcommand.
         let Some(sub) = cmd.data.options.first() else {
@@ -223,6 +258,7 @@ impl Bot {
             "upload" => self.recipe_upload(ctx, cmd, opts).await,
             "list" => self.recipe_list(ctx, cmd).await,
             "info" => self.recipe_info(ctx, cmd, opts).await,
+            "delete" => self.recipe_delete(ctx, cmd, opts).await,
             other => {
                 reply(ctx, cmd, format!("Unknown recipe subcommand `{other}`.")).await?;
                 Ok(())
@@ -490,6 +526,40 @@ impl Bot {
         );
 
         reply(ctx, cmd, clip(&body, 2000)).await?;
+        Ok(())
+    }
+
+    async fn recipe_delete(
+        &self,
+        ctx: &Context,
+        cmd: &CommandInteraction,
+        options: &[CommandDataOption],
+    ) -> anyhow::Result<()> {
+        let namespace = namespace(cmd);
+
+        let Some(name) = option_str(options, "name") else {
+            reply(ctx, cmd, "Missing required `name` option.").await?;
+            return Ok(());
+        };
+
+        let removed = self
+            .data
+            .store
+            .lock()
+            .unwrap()
+            .delete_capacitorfile(namespace, &name)?;
+
+        if removed {
+            reply(ctx, cmd, format!("Deleted recipe `{name}`.")).await?;
+        } else {
+            reply(
+                ctx,
+                cmd,
+                format!("No recipe named `{name}` in this server."),
+            )
+            .await?;
+        }
+
         Ok(())
     }
 
@@ -778,6 +848,11 @@ impl Bot {
                     .into_iter()
                     .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned))
                     .collect(),
+                ("dataset", "name") => store
+                    .list_datasets(namespace)
+                    .into_iter()
+                    .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned))
+                    .collect(),
                 _ => store.list(namespace).into_iter().map(|m| m.name).collect(),
             }
         };
@@ -876,7 +951,7 @@ impl Bot {
             ctx,
             cmd,
             "**Capacitor bot**\n\
-             Commands: `/dataset` (`upload`/`list`), `/recipe` (`create`/`edit`/`upload`/`list`/`info`), \
+             Commands: `/dataset` (`upload`/`list`/`delete`), `/recipe` (`create`/`edit`/`upload`/`list`/`info`/`delete`), \
              `/train`, `/query`, `/list`, `/show`, `/delete`.",
         )
         .await?;
@@ -955,7 +1030,23 @@ fn commands() -> Vec<CreateCommand> {
                 CommandOptionType::SubCommand,
                 "list",
                 "List datasets in this server",
-            )),
+            ))
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::SubCommand,
+                    "delete",
+                    "Delete a dataset from this server",
+                )
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "name",
+                        "Name of the dataset to delete",
+                    )
+                    .required(true)
+                    .set_autocomplete(true),
+                ),
+            ),
         CreateCommand::new("recipe")
             .description("Manage capacitorfile recipes for this server")
             .add_option(
@@ -1022,6 +1113,22 @@ fn commands() -> Vec<CreateCommand> {
                         CommandOptionType::String,
                         "name",
                         "Name of the capacitorfile",
+                    )
+                    .required(true)
+                    .set_autocomplete(true),
+                ),
+            )
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::SubCommand,
+                    "delete",
+                    "Delete a capacitorfile recipe from this server",
+                )
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "name",
+                        "Name of the capacitorfile to delete",
                     )
                     .required(true)
                     .set_autocomplete(true),
