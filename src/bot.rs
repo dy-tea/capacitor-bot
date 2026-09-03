@@ -322,9 +322,7 @@ impl Bot {
     ) -> anyhow::Result<()> {
         let namespace = namespace(cmd);
 
-        let name = option_str(options, "name")
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| String::from("recipe.capacitor"));
+        let provided_name = option_str(options, "name").filter(|s| !s.is_empty());
 
         let prompt = "Reply to this message with the capacitorfile recipe content. \
             Editing your reply will update the recipe file."
@@ -342,6 +340,18 @@ impl Bot {
         };
 
         let content = recipe_edit::strip_fence(&reply.content);
+
+        let name = match provided_name {
+            Some(name) => name,
+            None => match capacitor::recipe::Recipe::from_str(&content) {
+                Ok(recipe) => recipe
+                    .keys
+                    .get("model.name")
+                    .cloned()
+                    .unwrap_or_else(|| String::from("recipe.capacitor")),
+                Err(_) => String::from("recipe.capacitor"),
+            },
+        };
 
         let saved = self.data.store.lock().unwrap().save_capacitorfile(
             namespace,
